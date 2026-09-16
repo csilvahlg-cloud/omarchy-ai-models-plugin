@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "carlos.ai-models",
+  "id": "user.ai-models",
   "name": "AI Models",
   "version": "1.0.0",
-  "author": "carlos",
+  "author": "user",
   "license": "MIT",
   "description": "Play/stop your local AI models (Ollama + raw GGUF via llama-server) from the Omarchy bar.",
   "kinds": ["bar-widget"],

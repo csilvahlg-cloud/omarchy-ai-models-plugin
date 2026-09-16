@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_ID="carlos.ai-models"
+PLUGIN_ID="user.ai-models"
 PLUGIN_DIR="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 BIN_DIR="$HOME/.local/bin"
 

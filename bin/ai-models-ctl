@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ai-models-ctl — list/start/stop local AI models (Ollama + raw llama.cpp GGUF)
-# Backend for the "AI Models" Omarchy shell plugin (carlos.ai-models).
+# Backend for the "AI Models" Omarchy shell plugin (user.ai-models).
 set -uo pipefail
 
 CONFIG="${AI_MODELS_CONFIG:-$HOME/.config/omarchy/ai-models.json}"

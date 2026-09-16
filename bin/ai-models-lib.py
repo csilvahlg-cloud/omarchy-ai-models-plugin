@@ -50,7 +50,7 @@ def ensure_config(cfg_path, llama_bin):
         os.path.expanduser("~/.cache/huggingface/hub/models--*/snapshots/*/*.gguf"),
         os.path.expanduser("~/.unsloth/studio/cache/ollama_links/*/*/*.gguf"),
     ]
-    # Single shared port: Carlos runs one model at a time; use llama.cpp's default.
+    # Single shared port: only one raw GGUF model runs at a time; use llama.cpp's default.
     port = 8080
     for pattern in search_globs:
         for path in sorted(glob.glob(pattern)):

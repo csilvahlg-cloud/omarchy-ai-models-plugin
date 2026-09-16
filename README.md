@@ -44,7 +44,7 @@ cd omarchy-ai-models-plugin
 ```
 
 This copies:
-- `plugin/` → `~/.config/omarchy/plugins/carlos.ai-models/`
+- `plugin/` → `~/.config/omarchy/plugins/user.ai-models/`
 - `bin/ai-models-ctl` + `bin/ai-models-lib.py` → `~/.local/bin/`
 
 and registers the widget in `~/.config/omarchy/shell.json`'s

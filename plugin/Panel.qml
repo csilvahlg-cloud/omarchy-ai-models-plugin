@@ -7,8 +7,8 @@ import qs.Commons
 
 Panel {
   id: root
-  moduleName: "carlos.ai-models"
-  ipcTarget: "carlos.ai-models"
+  moduleName: "user.ai-models"
+  ipcTarget: "user.ai-models"
 
   // Give the bar item an intrinsic size; without this the BarIconButton
   // (anchors.fill: parent) inherits a 0x0 root and the glyph never renders.
