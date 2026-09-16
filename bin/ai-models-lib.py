@@ -74,7 +74,7 @@ def ensure_config(cfg_path, llama_bin):
                 "kind": "llama-server",
                 "path": path,
                 "port": port,
-                "extraArgs": ["-c", "8192"],
+                "extraArgs": ["-c", "124000", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"],
             })
 
     if set(prev.keys()) != {e["id"] for e in entries} or not os.path.exists(cfg_path):

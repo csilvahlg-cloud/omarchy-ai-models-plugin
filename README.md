@@ -20,8 +20,9 @@ the built-in Power/Bluetooth/Tailscale panels, not a separate web app.
   - **Ollama models** are started via `POST /api/generate {keep_alive:-1}`
     (loads and keeps the model warm) and stopped via `ollama stop`.
   - **Raw GGUF models** are started by spawning
-    `llama-server -m <path> --port <n> -c 8192` and tracked by a pidfile;
-    stop just kills that pid.
+    `llama-server -m <path> --port <n> -c 124000 -fa on -ctk q8_0 -ctv q8_0`
+    (124K context, flash attention, quantized KV cache to fit large contexts
+    in limited RAM) and tracked by a pidfile; stop just kills that pid.
 - Panel auto-refreshes on a timer (default 10s, configurable) so status
   dots reflect reality even if you start/stop a model from the terminal.
 
@@ -107,6 +108,12 @@ ai-models-ctl regen-config      # rescan for new models
   `127.0.0.1` only).
 - Loading large models (30B+) needs real RAM — a 15GB machine can OOM-kill
   Ollama trying to load a 27B model. Size your models to your hardware.
+- At 124K context + `q8_0` KV cache quantization, tested on a 15GB-RAM
+  machine: a ~14GB model (26B MoE) processed a real 40K-token prompt with
+  ~1.4GB RAM headroom; a ~21GB model (35B MoE) did the same but with only
+  ~560MB headroom and ~880MB pushed into swap — workable but tight. If you
+  hit OOM kills, lower `-c` in `ai-models.json`'s `extraArgs` for that
+  specific model (e.g. back to 65536 or 32768), or free RAM elsewhere first.
 - `qmllint` reports a lot of false-positive warnings against Omarchy's
   virtual `qs.*` QML modules (only resolved by Quickshell's own loader) —
   don't use it as a pass/fail gate. `omarchy plugin validate` is the real one.
