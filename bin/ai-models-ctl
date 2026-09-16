@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# ai-models-ctl — list/start/stop local AI models (Ollama + raw llama.cpp GGUF)
+# Backend for the "AI Models" Omarchy shell plugin (carlos.ai-models).
+set -uo pipefail
+
+CONFIG="${AI_MODELS_CONFIG:-$HOME/.config/omarchy/ai-models.json}"
+STATE_DIR="${AI_MODELS_STATE_DIR:-$HOME/.cache/ai-models-ctl}"
+LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-$HOME/.unsloth/llama.cpp/llama-server}"
+OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
+LIB="$HOME/.local/bin/ai-models-lib.py"
+
+mkdir -p "$STATE_DIR"
+
+ollama_running_models() {
+  curl -s -m 3 "http://${OLLAMA_HOST}/api/ps" 2>/dev/null | python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    print("\n".join(m.get("name","") for m in d.get("models",[])))
+except Exception:
+    pass
+'
+}
+
+ollama_start() {
+  local model="$1"
+  nohup curl -s -m 5 "http://${OLLAMA_HOST}/api/generate" \
+    -d "{\"model\":\"${model}\",\"prompt\":\"\",\"keep_alive\":-1}" \
+    >/dev/null 2>&1 &
+  disown
+  echo "ok"
+}
+
+ollama_stop() {
+  local model="$1"
+  ollama stop "$model" >/dev/null 2>&1
+  echo "ok"
+}
+
+gguf_pidfile() { echo "$STATE_DIR/$(echo "$1" | tr '/:' '__').pid"; }
+gguf_logfile() { echo "$STATE_DIR/$(echo "$1" | tr '/:' '__').log"; }
+
+gguf_is_running() {
+  local id="$1"
+  local pf; pf="$(gguf_pidfile "$id")"
+  [[ -f "$pf" ]] || return 1
+  local pid; pid="$(cat "$pf" 2>/dev/null)"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+gguf_stop_all_others() {
+  # All gguf models share port 8080 (one at a time): stop any other running one first.
+  local keep_pf="$1" pf pid
+  for pf in "$STATE_DIR"/*.pid; do
+    [[ -f "$pf" && "$pf" != "$keep_pf" ]] || continue
+    pid="$(cat "$pf" 2>/dev/null)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null
+      sleep 0.3
+      kill -9 "$pid" 2>/dev/null
+    fi
+    rm -f "$pf"
+  done
+}
+
+gguf_start() {
+  local id="$1" path="$2" port="$3"; shift 3
+  local extra=("$@")
+  if gguf_is_running "$id"; then echo "already-running"; return; fi
+  gguf_stop_all_others "$(gguf_pidfile "$id")"
+  if [[ ! -x "$LLAMA_SERVER_BIN" ]]; then echo "error: llama-server not found at $LLAMA_SERVER_BIN" >&2; echo "error"; return; fi
+  local pf; pf="$(gguf_pidfile "$id")"
+  local lf; lf="$(gguf_logfile "$id")"
+  nohup "$LLAMA_SERVER_BIN" -m "$path" --port "$port" --host 127.0.0.1 "${extra[@]}" \
+    >"$lf" 2>&1 &
+  local pid=$!
+  disown
+  echo "$pid" > "$pf"
+  # Open the llama-server web UI once the model finishes loading: poll /health
+  # (large models take a while), then xdg-open — opens the browser, or a new
+  # tab if one is already open. Give up quietly after 5 min or if the server died.
+  (
+    for _ in $(seq 1 300); do
+      kill -0 "$pid" 2>/dev/null || exit 0
+      if curl -sf -m 2 "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
+        setsid xdg-open "http://127.0.0.1:$port" >/dev/null 2>&1
+        exit 0
+      fi
+      sleep 1
+    done
+  ) >/dev/null 2>&1 &
+  disown
+  echo "ok"
+}
+
+gguf_stop() {
+  local id="$1"
+  local pf; pf="$(gguf_pidfile "$id")"
+  if [[ -f "$pf" ]]; then
+    local pid; pid="$(cat "$pf")"
+    kill "$pid" 2>/dev/null
+    sleep 0.3
+    kill -9 "$pid" 2>/dev/null
+    rm -f "$pf"
+  fi
+  echo "ok"
+}
+
+ensure_config() {
+  python3 "$LIB" ensure-config "$CONFIG" "$LLAMA_SERVER_BIN"
+}
+
+get_entry() {
+  python3 "$LIB" get-entry "$CONFIG" "$1"
+}
+
+case "${1:-}" in
+  list)
+    ensure_config
+    running="$(ollama_running_models)"
+    python3 "$LIB" list "$CONFIG" "$running" "$STATE_DIR"
+    ;;
+  start)
+    id="${2:?model id required}"
+    ensure_config
+    entry="$(get_entry "$id")"
+    if [[ -z "$entry" ]]; then echo "error: unknown id $id" >&2; exit 1; fi
+    kind="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["kind"])' "$entry")"
+    if [[ "$kind" == "ollama" ]]; then
+      model="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["model"])' "$entry")"
+      ollama_start "$model"
+    else
+      path="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["path"])' "$entry")"
+      port="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["port"])' "$entry")"
+      mapfile -t extra < <(python3 -c 'import json,sys;[print(a) for a in json.loads(sys.argv[1]).get("extraArgs",[])]' "$entry")
+      gguf_start "$id" "$path" "$port" "${extra[@]}"
+    fi
+    ;;
+  stop)
+    id="${2:?model id required}"
+    ensure_config
+    entry="$(get_entry "$id")"
+    if [[ -z "$entry" ]]; then echo "error: unknown id $id" >&2; exit 1; fi
+    kind="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["kind"])' "$entry")"
+    if [[ "$kind" == "ollama" ]]; then
+      model="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["model"])' "$entry")"
+      ollama_stop "$model"
+    else
+      gguf_stop "$id"
+    fi
+    ;;
+  regen-config)
+    rm -f "$CONFIG"
+    ensure_config
+    echo "ok"
+    ;;
+  *)
+    echo "usage: ai-models-ctl {list|start <id>|stop <id>|regen-config}" >&2
+    exit 1
+    ;;
+esac
