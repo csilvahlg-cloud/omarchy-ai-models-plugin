@@ -16,13 +16,20 @@ the built-in Power/Bluetooth/Tailscale panels, not a separate web app.
   - Raw `.gguf` files under `~/.cache/huggingface/hub/models--*/snapshots/*/*.gguf`
     and `~/.unsloth/studio/cache/ollama_links/*/*/*.gguf` (skips `mmproj-*`,
     `mtp-*`, `ggml-vocab-*` helper files)
+- **Reuses your Unsloth Studio per-model tuning.** If `~/.unsloth/studio/studio.db`
+  exists, newly-discovered models inherit the exact context length and KV
+  cache quantization you've already dialed in inside Unsloth Studio's UI
+  (per-variant overrides first, then the model's general `maxTokens`, then a
+  124K/`q8_0` fallback if Studio has no opinion). This keeps the bar plugin
+  and Unsloth Studio from silently drifting apart on the same model.
 - Play/Stop each model independently:
   - **Ollama models** are started via `POST /api/generate {keep_alive:-1}`
-    (loads and keeps the model warm) and stopped via `ollama stop`.
+    (loads and keeps the model warm) and stopped via `ollama stop`; if Studio
+    has a tuned context length for that model, it's passed as `options.num_ctx`.
   - **Raw GGUF models** are started by spawning
-    `llama-server -m <path> --port <n> -c 124000 -fa on -ctk q8_0 -ctv q8_0`
-    (124K context, flash attention, quantized KV cache to fit large contexts
-    in limited RAM) and tracked by a pidfile; stop just kills that pid.
+    `llama-server -m <path> --port <n> -c <N> -fa on -ctk <T> -ctv <T>`
+    (Studio-tuned `-c`/KV dtype when available, else 124K + `q8_0`) and
+    tracked by a pidfile; stop just kills that pid.
 - Panel auto-refreshes on a timer (default 10s, configurable) so status
   dots reflect reality even if you start/stop a model from the terminal.
 
@@ -114,6 +121,8 @@ ai-models-ctl regen-config      # rescan for new models
   ~560MB headroom and ~880MB pushed into swap — workable but tight. If you
   hit OOM kills, lower `-c` in `ai-models.json`'s `extraArgs` for that
   specific model (e.g. back to 65536 or 32768), or free RAM elsewhere first.
+  If you have Unsloth Studio, tuning context/KV-cache per model there and
+  re-running `ai-models-ctl regen-config` is the easiest way to do this.
 - `qmllint` reports a lot of false-positive warnings against Omarchy's
   virtual `qs.*` QML modules (only resolved by Quickshell's own loader) —
   don't use it as a pass/fail gate. `omarchy plugin validate` is the real one.

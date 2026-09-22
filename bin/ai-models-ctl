@@ -23,9 +23,13 @@ except Exception:
 }
 
 ollama_start() {
-  local model="$1"
+  local model="$1" num_ctx="${2:-}"
+  local opts="{}"
+  if [[ -n "$num_ctx" ]]; then
+    opts="{\"num_ctx\":${num_ctx}}"
+  fi
   nohup curl -s -m 5 "http://${OLLAMA_HOST}/api/generate" \
-    -d "{\"model\":\"${model}\",\"prompt\":\"\",\"keep_alive\":-1}" \
+    -d "{\"model\":\"${model}\",\"prompt\":\"\",\"keep_alive\":-1,\"options\":${opts}}" \
     >/dev/null 2>&1 &
   disown
   echo "ok"
@@ -128,7 +132,8 @@ case "${1:-}" in
     kind="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["kind"])' "$entry")"
     if [[ "$kind" == "ollama" ]]; then
       model="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["model"])' "$entry")"
-      ollama_start "$model"
+      num_ctx="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1]).get("numCtx",""))' "$entry")"
+      ollama_start "$model" "$num_ctx"
     else
       path="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["path"])' "$entry")"
       port="$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["port"])' "$entry")"

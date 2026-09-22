@@ -8,8 +8,115 @@ Usage:
 import glob
 import json
 import os
+import sqlite3
 import subprocess
 import sys
+import urllib.parse
+
+STUDIO_DB = os.path.expanduser("~/.unsloth/studio/studio.db")
+# Fallback used only when Unsloth Studio has no tuned value for a model
+# (no studio.db, no matching entry). Verified safe on a 15GB-RAM machine
+# for models up to ~21GB on disk — see the plugin README for numbers.
+DEFAULT_CONTEXT = 124000
+DEFAULT_KV_CACHE_DTYPE = "q8_0"
+
+
+def _load_json_setting(cur, table, key):
+    try:
+        cur.execute(f"SELECT value_json FROM {table} WHERE key = ?", (key,))
+        row = cur.fetchone()
+        return json.loads(row[0]) if row else None
+    except Exception:
+        return None
+
+
+def load_studio_tuning():
+    """Read the user's own per-model context/KV-cache tuning straight out of
+    Unsloth Studio's sqlite DB, so the bar plugin always mirrors whatever is
+    dialed in there instead of drifting out of sync. Returns
+    (variant_overrides, repo_default_ctx, ollama_overrides) — all possibly
+    empty dicts if the DB is missing/unreadable (fresh install, Studio never
+    run, etc.). ollama_overrides maps 'name:tag' (as shown by `ollama list`)
+    -> {custom_context_length, kv_cache_dtype}."""
+    variant_overrides, repo_default_ctx, ollama_overrides = {}, {}, {}
+    if not os.path.exists(STUDIO_DB):
+        return variant_overrides, repo_default_ctx, ollama_overrides
+    try:
+        con = sqlite3.connect(f"file:{STUDIO_DB}?mode=ro", uri=True, timeout=2)
+        cur = con.cursor()
+        # variant_overrides: "author/repo:VARIANT" -> {custom_context_length, kv_cache_dtype, ...}
+        # ollama entries share the same setting, keyed "ollama-manifest:<urlencoded manifest path>[:tag]"
+        overrides = _load_json_setting(cur, "app_settings", "openai_api_auto_switch_overrides") or {}
+        for key, val in overrides.items():
+            if not (isinstance(val, dict) and val.get("custom_context_length")):
+                continue
+            if key.startswith("ollama-manifest:"):
+                name_tag = _ollama_name_tag_from_studio_key(key)
+                if name_tag:
+                    ollama_overrides[name_tag] = val
+            else:
+                variant_overrides[key] = val
+        # repo_default_ctx: "author/repo" -> maxTokens (used when no variant-specific override exists)
+        params_by_model = _load_json_setting(cur, "chat_settings", "inferenceParamsByModel") or {}
+        for repo_key, val in params_by_model.items():
+            if isinstance(val, dict) and val.get("maxTokens"):
+                repo_default_ctx[repo_key] = val["maxTokens"]
+        con.close()
+    except Exception:
+        return {}, {}, {}
+    return variant_overrides, repo_default_ctx, ollama_overrides
+
+
+def _repo_from_hf_cache_path(path):
+    """'.../models--unsloth--gemma-4-26B-A4B-it-qat-GGUF/snapshots/...' -> 'unsloth/gemma-4-26B-A4B-it-qat-GGUF'"""
+    for part in path.split(os.sep):
+        if part.startswith("models--"):
+            pieces = part[len("models--"):].split("--", 1)
+            if len(pieces) == 2:
+                return f"{pieces[0]}/{pieces[1]}"
+    return None
+
+
+def _ollama_name_tag_from_studio_key(key):
+    """'ollama-manifest:%2fusr%2f.../library/qwen3.6/27b[:27b]' -> 'qwen3.6:27b'.
+    Studio derives the manifest path from Ollama's own on-disk layout
+    (.../manifests/registry.ollama.ai/library/<name>/<tag>); `ollama list`
+    shows the same pair as 'name:tag', which is what we need to match against."""
+    manifest_part = key[len("ollama-manifest:"):]
+    manifest_part = manifest_part.split(":", 1)[0]  # drop an optional trailing ":tag" studio sometimes appends
+    decoded = urllib.parse.unquote(manifest_part)
+    marker = "/library/"
+    idx = decoded.find(marker)
+    if idx == -1:
+        return None
+    tail = decoded[idx + len(marker):].strip("/").split("/")
+    if len(tail) < 2:
+        return None
+    return f"{tail[0]}:{tail[1]}"
+
+
+def studio_extra_args_for_gguf(path, filename_stem, variant_overrides, repo_default_ctx):
+    """Match this GGUF file against the user's Studio tuning. Variant-specific
+    overrides win (matched by the variant token, e.g. 'UD-Q4_K_XL', appearing
+    in the filename); otherwise fall back to the repo-level maxTokens; otherwise
+    the plugin default. -fa on is mandatory whenever -ctk/-ctv are quantized."""
+    repo = _repo_from_hf_cache_path(path)
+    context = None
+    kv_dtype = DEFAULT_KV_CACHE_DTYPE
+    if repo:
+        for key, val in variant_overrides.items():
+            if not key.startswith(repo + ":"):
+                continue
+            variant = key.split(":", 1)[1]
+            if variant and variant in filename_stem:
+                context = int(val["custom_context_length"])
+                kv_dtype = val.get("kv_cache_dtype", DEFAULT_KV_CACHE_DTYPE)
+                break
+        if context is None and repo in repo_default_ctx:
+            context = int(repo_default_ctx[repo])
+    if context is None:
+        context = DEFAULT_CONTEXT
+    return ["-c", str(context), "-fa", "on", "-ctk", kv_dtype, "-ctv", kv_dtype]
 
 
 def ensure_config(cfg_path, llama_bin):
@@ -26,6 +133,7 @@ def ensure_config(cfg_path, llama_bin):
             prev = {}
     os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
     entries = []
+    variant_overrides, repo_default_ctx, ollama_overrides = load_studio_tuning()
 
     try:
         res = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=5)
@@ -35,12 +143,20 @@ def ensure_config(cfg_path, llama_bin):
                 continue
             name = parts[0]
             eid = "ollama:" + name
-            entries.append(prev.get(eid) or {
+            existing = prev.get(eid)
+            if existing:
+                entries.append(existing)
+                continue
+            entry = {
                 "id": eid,
                 "name": name,
                 "kind": "ollama",
                 "model": name,
-            })
+            }
+            tuned = ollama_overrides.get(name)
+            if tuned:
+                entry["numCtx"] = int(tuned["custom_context_length"])
+            entries.append(entry)
     except Exception:
         pass
 
@@ -68,13 +184,17 @@ def ensure_config(cfg_path, llama_bin):
             seen_paths.add(real)
             label = base.replace(".gguf", "")
             eid = "gguf:" + label
-            entries.append(prev.get(eid) or {
+            existing = prev.get(eid)
+            if existing:
+                entries.append(existing)
+                continue
+            entries.append({
                 "id": eid,
                 "name": label,
                 "kind": "llama-server",
                 "path": path,
                 "port": port,
-                "extraArgs": ["-c", "124000", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0"],
+                "extraArgs": studio_extra_args_for_gguf(path, label, variant_overrides, repo_default_ctx),
             })
 
     if set(prev.keys()) != {e["id"] for e in entries} or not os.path.exists(cfg_path):
